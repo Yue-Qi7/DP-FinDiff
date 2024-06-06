@@ -1,3 +1,7 @@
+"""
+The following modifications were made to the file:
+    - Global functions were created for categorical variables embedding
+"""
 import torch
 from torch import nn
 import math
@@ -20,7 +24,15 @@ def timestep_embedding(timesteps, dim_out, max_period=10000):
     :return: an [N x dim] Tensor of positional embeddings.
     """
     half = dim_out // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(device=timesteps.device)
+
+    # determine tensor of frequencies; range from 1 to almost 0
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32)
+        / half
+    ).to(device=timesteps.device)
+
+    # create timestep vs.frequency grid; have dimension of len(timesteps), half
     args = timesteps[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim_out % 2:
@@ -28,31 +40,62 @@ def timestep_embedding(timesteps, dim_out, max_period=10000):
     return embedding
 
 
-class MLP(nn.Module):
-    """ Base FeedForward Network 
+def get_embeddings(embedding):
+    """Extract embedding vectors - mapping from each unique value to its embedding (ascending order)
+
+    Args:
+        embedding (nn.Embedding): categorical variable embedding layer
+
+    Returns:
+        tensor: embedding vectors
     """
-    def __init__(self, hidden_size, activation='lrelu'):
+    return embedding.weight.data
+
+
+def embed_categorical(embedding, x_cat):
+    """Perform embedding mapping for categorical attributes
+
+    Args:
+        embedding (nn.Embedding): categorical variable embedding layer
+        x_cat (tensor): categorical tokens
+
+    Returns:
+        tensor: embeddings
+    """
+
+    # perform embedding mapping and then reshape
+    x_cat_emb = embedding(x_cat)
+    x_cat_emb = x_cat_emb.view(-1, x_cat_emb.shape[1] * x_cat_emb.shape[2])
+    return x_cat_emb
+
+
+class MLP(nn.Module):
+    """Base FeedForward Network"""
+
+    def __init__(self, hidden_size, activation="lrelu"):
         super(MLP, self).__init__()
         # init encoder architecture
         self.layers = self.init_layers(hidden_size)
-        if activation == 'lrelu':
+        if activation == "lrelu":
             self.activation = nn.LeakyReLU(negative_slope=0.4, inplace=True)
-        elif activation == 'relu':
+        elif activation == "relu":
             self.activation = nn.ReLU(inplace=True)
-        elif activation == 'tanh':
+        elif activation == "tanh":
             self.activation = nn.Tanh()
-        elif activation == 'sigmoid':
+        elif activation == "sigmoid":
             self.activation = nn.Sigmoid()
         else:
-            print('WRONG bottleneck function name !!!')
+            print("WRONG bottleneck function name !!!")
 
     def init_layers(self, layer_dimensions):
         layers = []
-        for i in range(len(layer_dimensions)-1):
-            linear_layer = init_linear_layer(layer_dimensions[i], layer_dimensions[i + 1])
+        for i in range(len(layer_dimensions) - 1):
+            linear_layer = init_linear_layer(
+                layer_dimensions[i], layer_dimensions[i + 1]
+            )
             layers.append(linear_layer)
-            
-            self.add_module('linear_' + str(i), linear_layer)
+
+            self.add_module("linear_" + str(i), linear_layer)
         return layers
 
     def forward(self, x):
@@ -63,20 +106,21 @@ class MLP(nn.Module):
 
 
 class MLPSynthesizer(nn.Module):
-    """ Feed Forward Network used as a synthesizer in the diffusion process."""
+    """Feed Forward Network used as a synthesizer in the diffusion process."""
+
     def __init__(
-            self, 
-            d_in: int, 
-            hidden_layers: list, 
-            activation: str='lrelu', 
-            dim_t: int=64, 
-            n_cat_tokens=None, 
-            n_cat_emb=None,
-            embedding=None, 
-            embedding_learned=True, 
-            n_classes=None
-        ):
-        """ Constructor for initializing the synthesizer
+        self,
+        d_in: int,
+        hidden_layers: list,
+        activation: str = "lrelu",
+        dim_t: int = 64,
+        n_cat_tokens=None,
+        n_cat_emb=None,
+        embedding=None,
+        embedding_learned=True,
+        n_classes=None,
+    ):
+        """Constructor for initializing the synthesizer
 
         Args:
             d_in (int): dimensionality of the input data
@@ -95,7 +139,9 @@ class MLPSynthesizer(nn.Module):
         if embedding is not None:
             self.embedding = nn.Embedding.from_pretrained(embeddings=embedding)
         elif n_cat_tokens and n_cat_emb:
-            self.embedding = nn.Embedding(n_cat_tokens, n_cat_emb, max_norm=None, scale_grad_by_freq=False)
+            self.embedding = nn.Embedding(
+                n_cat_tokens, n_cat_emb, max_norm=None, scale_grad_by_freq=False
+            )  # each value is converted to a n_cat_emb dimension vector
             self.embedding.weight.requires_grad = embedding_learned
 
         # embed label
@@ -104,58 +150,29 @@ class MLPSynthesizer(nn.Module):
 
         # projection used for the input data
         self.proj = nn.Sequential(
-            nn.Linear(d_in, dim_t),
-            nn.SiLU(),
-            nn.Linear(dim_t, dim_t)
+            nn.Linear(d_in, dim_t), nn.SiLU(), nn.Linear(dim_t, dim_t)
         )
-        
+
         # projection for the time embedding
         self.time_embed = nn.Sequential(
-            nn.Linear(dim_t, dim_t),
-            nn.SiLU(),
-            nn.Linear(dim_t, dim_t)
+            nn.Linear(dim_t, dim_t), nn.SiLU(), nn.Linear(dim_t, dim_t)
         )
-        
+
         # used for the output layer
         self.head = nn.Linear(hidden_layers[-1], d_in)
 
-    def get_embeddings(self):
-        """ Extract embedding vectors 
-
-        Returns:
-            tensor: embedding vectors
-        """
-        return self.embedding.weight.data
-
-    def embed_categorical(self, x_cat):
-        """ Perform embedding mapping for categorical attributes
-
-        Args:
-            x_cat (tensor): categorical tokens
-
-        Returns:
-            tensor: embeddings
-        """
-
-        # perform embedding mapping and then reshape
-        x_cat_emb = self.embedding(x_cat)
-        x_cat_emb = x_cat_emb.view(-1, x_cat_emb.shape[1] * x_cat_emb.shape[2])
-        return x_cat_emb
-
     def forward(self, x, timesteps, label=None):
-        
         # time embeddings
         emb = self.time_embed(timestep_embedding(timesteps, self.dim_t))
-        
+
         # add label embeddings
         if label is not None:
             emb = emb + self.label_emb(label)
 
-        # aggeregated data projection with time & label embeddings
+        # aggregated data projection with time (and label embeddings)
         x = self.proj(x) + emb
 
         # additional mlp layers
         x = self.mlp(x)
         x = self.head(x)
         return x
-

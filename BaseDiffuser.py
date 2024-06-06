@@ -1,20 +1,24 @@
-import math
+"""
+The following modifications were made to the file:
+    - Unused libs were removed
+    - Last step was included in timestep sampling
+    - beta_hat at first step is now able to be sampled when adding noise
+    - alpha, alphas_hat and beta sampling in the reverse diffusion process was fixed
+    - Random noise generation was fixed at steps 1 in the reverse diffusion process
+"""
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 
 
 class BaseDiffuser(object):
-
     def __init__(
-            self, 
-            total_steps=1000, 
-            beta_start=1e-4, 
-            beta_end=0.02, 
-            device='cpu',
-            scheduler='linear'
-        ):
+        self,
+        total_steps=1000,
+        beta_start=1e-4,
+        beta_end=0.02,
+        device="cpu",
+        scheduler="linear",
+    ):
         """Base constructor for diffusion operations
 
         Args:
@@ -34,7 +38,7 @@ class BaseDiffuser(object):
         self.alphas_hat = torch.cumprod(self.alphas, dim=0)
 
     def prepare_noise_schedule(self, scheduler: str):
-        """ build a noise scheduler based on the provided scheduler type, total steps, and start/end betas
+        """build a noise scheduler based on the provided scheduler type, total steps, and start/end betas
 
         Args:
             scheduler (str): a scheduler type (linear, quad)
@@ -43,20 +47,28 @@ class BaseDiffuser(object):
             Exception: wrong scheduler type
 
         Returns:
-            Tensor: corrensponding alphas and betas
+            Tensor: corresponding alphas and betas
         """
         scale = 1000 / self.total_steps
         beta_start = scale * self.beta_start
         beta_end = scale * self.beta_end
-        if scheduler == 'linear':
+
+        if scheduler == "linear":
             # betas = torch.linspace(self.beta_start, self.beta_end, self.total_steps)
-            betas = torch.linspace(beta_start, beta_end, self.total_steps)
+            betas = torch.linspace(
+                beta_start, beta_end, self.total_steps
+            )  # total # of data points = self.total_steps
             alphas = 1.0 - betas
-        elif scheduler == 'quad':
-            betas = torch.linspace(self.beta_start ** 0.5, self.beta_end ** 0.5, self.total_steps) ** 2
+        elif scheduler == "quad":
+            betas = (
+                torch.linspace(
+                    self.beta_start**0.5, self.beta_end**0.5, self.total_steps
+                )
+                ** 2
+            )
             alphas = 1.0 - betas
         else:
-            raise Exception('Undefined scheduler name')
+            raise Exception("Undefined scheduler name")
 
         return alphas.to(self.device), betas.to(self.device)
 
@@ -69,11 +81,13 @@ class BaseDiffuser(object):
         Returns:
             Tensor: generated list of random timesteps
         """
-        t = torch.randint(low=1, high=self.total_steps, size=(n,), device=self.device)
+        t = torch.randint(
+            low=1, high=self.total_steps + 1, size=(n,), device=self.device
+        )
         return t
 
     def add_gauss_noise(self, x_num, t):
-        """ Add gaussian noise to the input data given a specific timestep value
+        """Add gaussian noise to the input data given a specific timestep value
 
         Args:
             x_num (Tensor): input data tensor
@@ -83,14 +97,14 @@ class BaseDiffuser(object):
             Tensor: a data tensor with injected noise (x_noise_num) and noise itself (x_noise)
         """
         # numeric attributes
-        sqrt_alpha_hat = torch.sqrt(self.alphas_hat[t])[:, None]
-        sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alphas_hat[t])[:, None]
+        sqrt_alpha_hat = torch.sqrt(self.alphas_hat[t - 1])[:, None]
+        sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alphas_hat[t - 1])[:, None]
         noise_num = torch.randn_like(x_num)
         x_noise_num = sqrt_alpha_hat * x_num + sqrt_one_minus_alpha_hat * noise_num
         return x_noise_num, noise_num
 
     def p_sample_gauss(self, model_out, z_norm, t):
-        """ Sampling or denoising step
+        """Sampling or denoising step
 
         Args:
             model_out: trained model used for noise removal
@@ -100,15 +114,20 @@ class BaseDiffuser(object):
         Returns:
             Tensor: denoised tensor
         """
-        sqrt_alpha_t = torch.sqrt(self.alphas[t])[:, None]
-        betas_t = self.betas[t][:, None]
-        sqrt_one_minus_alpha_hat_t = torch.sqrt(1 - self.alphas_hat[t])[:, None]
-        epsilon_t = torch.sqrt(self.betas[t][:, None])
+        sqrt_alpha_t = torch.sqrt(self.alphas[t - 1])[:, None]
+        betas_t = self.betas[t - 1][:, None]
+        sqrt_one_minus_alpha_hat_t = torch.sqrt(1 - self.alphas_hat[t - 1])[:, None]
+
+        if all(t == 1):
+            epsilon_t = 0
+        else:
+            epsilon_t = torch.sqrt(self.betas[t - 1][:, None])
 
         random_noise = torch.randn_like(z_norm)
-        random_noise[t == 0] = 0.0
 
-        model_mean = ((1 / sqrt_alpha_t) * (z_norm - (betas_t * model_out / sqrt_one_minus_alpha_hat_t)))
+        model_mean = (1 / sqrt_alpha_t) * (
+            z_norm - (betas_t * model_out / sqrt_one_minus_alpha_hat_t)
+        )
         z_norm = model_mean + (epsilon_t * random_noise)
 
         return z_norm
